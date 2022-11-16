@@ -29,7 +29,12 @@ protected:
     void sock_close(int fd) override;
     int sock_read(int fd) override;
 
-    int task_register(int fd);
+    //===== 任务函数特点：参数为fd，返回两次读取的总和 =====
+    int task_register(int fd);//账号注册
+    int task_login(int fd);//登录请求
+    int task_logout(int fd);//账号退出
+
+    //===== 任务函数特点：参数为fd，返回两次读取的总和 =====
 };
 
 #endif // UX_SERVER_H
