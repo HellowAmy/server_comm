@@ -6,10 +6,10 @@ CONFIG -= qt
 SOURCES += \
         main.cpp \
         ux_epoll.cpp \
-        ux_server.cpp
+#        ux_server.cpp
 
 HEADERS += \
-    log_show.h \
+#    log_show.h \
     ux_epoll.h \
-    ux_protocol.h \
-    ux_server.h
+#    ux_protocol.h \
+#    ux_server.h
