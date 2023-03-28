@@ -1,35 +1,45 @@
 #include "ux_epoll.h"
 
 
-
 struct ct_msg
 {
     size_t len;
     string content;
 };
 
-
 size_t readn(int sock, void *buf, size_t len)
 {
-    ssize_t res;
     size_t all = len;
     char *pos = (char *)buf;
 
     while (all > 0)
     {
-         if ((res = read(sock,pos, all)) == -1)
+        size_t size = read(sock,pos,all);
+         if (size == -1u)
          {
-             if (errno == EINTR) res = 0;
-             else return (-1);
+             if (errno == EINTR) size = 0;
+             else return -1;
          }
-         else if (res == 0) break;
-         pos += res;
-         all -= res;
+         else if (size == 0) break;
+         pos += size;
+         all -= size;
     }
     return len - all;
 }
 
+bool read_msg(int sock,ct_msg &msg)
+{
+    size_t size = readn(sock,&msg.len,sizeof(msg.len));
+    cout<<"msg:len:  "<<msg.len<<endl;
+    if(size == -1u) return false;
 
+    char huf[1000];
+    if(readn(sock,huf,size) == -1u)//msg.content.data()
+    { return false; }
+
+    cout<<"huf: " <<huf<<endl;
+    return true;
+}
 
 
 
@@ -39,12 +49,19 @@ size_t readn(int sock, void *buf, size_t len)
 ux_epoll::ux_epoll()
 {
     sock_read = [](int sock){
-        char buf[4096];
-        memset(buf,0,sizeof(buf));
-        size_t ret = recv(sock, buf,sizeof(buf),MSG_WAITALL);
-        cout<<"buf: "<<buf<<endl;
-        cout<<"size: "<<ret<<endl;
-        return ret;
+        ct_msg msg;
+        if(read_msg(sock,msg))
+        {
+            cout<<"buf: "<<msg.content<<endl;
+            cout<<"size: "<<msg.len<<endl;
+        }
+
+//        char buf[4096];
+//        memset(buf,0,sizeof(buf));
+//        size_t ret = recv(sock, buf,sizeof(buf),MSG_WAITALL);
+//        cout<<"buf: "<<buf<<endl;
+//        cout<<"size: "<<ret<<endl;
+        return 100;
     };
 }
 

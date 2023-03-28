@@ -104,7 +104,10 @@ int main()
         msg.len = msg.content.size();
 
 //        size_t ret = 0;
-        for(int i=0;i<100;i++)
+
+        cout<<"buf: "<<msg.content<<endl;
+        cout<<"size: "<<msg.len<<endl;
+        for(int i=0;i<10;i++)
         {
             if(send_msg(sock,msg) == false)
             { cout<<"send_msg err"<<endl; }
