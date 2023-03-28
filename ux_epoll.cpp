@@ -1,15 +1,58 @@
 #include "ux_epoll.h"
 
+
+
+struct ct_msg
+{
+    size_t len;
+    string content;
+};
+
+
+size_t readn(int sock, void *buf, size_t len)
+{
+    ssize_t res;
+    size_t all = len;
+    char *pos = (char *)buf;
+
+    while (all > 0)
+    {
+         if ((res = read(sock,pos, all)) == -1)
+         {
+             if (errno == EINTR) res = 0;
+             else return (-1);
+         }
+         else if (res == 0) break;
+         pos += res;
+         all -= res;
+    }
+    return len - all;
+}
+
+
+
+
+
+
+
+
 ux_epoll::ux_epoll()
 {
-
+    sock_read = [](int sock){
+        char buf[4096];
+        memset(buf,0,sizeof(buf));
+        size_t ret = recv(sock, buf,sizeof(buf),MSG_WAITALL);
+        cout<<"buf: "<<buf<<endl;
+        cout<<"size: "<<ret<<endl;
+        return ret;
+    };
 }
 
 //!
 //! 返回值：
 //!     -1：socket打开失败
 //!     -2：bind建立失败
-//!     sock：返回成功，建立的端口号
+//!     sock：返回成功，建立的套接字
 //!
 int ux_epoll::init_port(int port)
 {
@@ -51,6 +94,7 @@ int ux_epoll::open_epoll(int port)
     vlogd("启动epoll成功:" vv(port));
 
     //创建一个epoll描述符
+    //参数1：无效数，不过要求必须大于0
     epollfd = epoll_create(1);
     if(epollfd <= 0) { return -2; }
 
@@ -61,6 +105,8 @@ int ux_epoll::open_epoll(int port)
     while (true)
     {
         //等待监视的socket有事件发生 | 参数4设置超时时间,-1为无限制
+        //参数1：epoll描述符，参数2：epoll事件数组，
+        //      参数3：同时处理的fd数量，参数4：超时（-1则无视超时时间）
         int infds = epoll_wait(epollfd, events, v_max_ev, -1);
         if (infds < 0) { return -3; }
 
@@ -72,7 +118,7 @@ int ux_epoll::open_epoll(int port)
             if ((events[i].data.fd == listensock)
                     && (events[i].events & EPOLLIN))
             {
-                //接收客户端的套接字
+                //建立请求，接收客户端的套接字（accept返回之后双方套接字可通信）
                 struct sockaddr_in client;
                 socklen_t len = sizeof(client);
                 int clientsock = accept(listensock,(struct sockaddr *)&client, &len);
@@ -86,7 +132,7 @@ int ux_epoll::open_epoll(int port)
                     { vlogw("epoll_add err"); continue; }
                     const char *str_ip = inet_ntoa(client.sin_addr);
                     int port = ntohs(client.sin_port);
-                    vlogf("新连接--成功加入:" vv(str_ip) vv(port));
+                    vlogd("新连接--成功加入:" vv(str_ip) vv(port));
 
                     if(sock_new) sock_new(events[i].data.fd,client);
                 }
@@ -105,9 +151,9 @@ int ux_epoll::open_epoll(int port)
                     if(sock_close) sock_close(events[i].data.fd);
 
                     //把已断开的客户端从epoll中删除
-                    if(epoll_add(events[i].data.fd) != 0)
+                    if(epoll_del(events[i].data.fd) != 0)
                     { vlogw("epoll_del err"); continue; }
-                    vlogw("客户端断开，断开的fd:" vv(events[i].data.fd));
+                    vlogd("客户端断开，断开的fd:" vv(events[i].data.fd));
                 }
 
             }//<<事件触发
@@ -118,6 +164,7 @@ int ux_epoll::open_epoll(int port)
 
 int ux_epoll::set_non_block(int fd)
 {
+    //将O_NONBLOCK无堵塞选项设置到fd中
     int old_op = fcntl(fd, F_GETFL);
     int new_op = old_op | O_NONBLOCK;
     fcntl(fd,F_SETFL,new_op);
@@ -126,7 +173,7 @@ int ux_epoll::set_non_block(int fd)
 
 int ux_epoll::epoll_del(int fd)
 {
-    //把已断开的客户端从epoll中删除--临时获取事件结构体
+    //从epoll移除fd，根据结构体信息
     struct epoll_event ev;
     memset(&ev, 0, sizeof(struct epoll_event));
     ev.events = EPOLLIN;
@@ -138,10 +185,10 @@ int ux_epoll::epoll_del(int fd)
 
 int ux_epoll::epoll_add(int fd)
 {
-    //将套接字加入epoll监听队列中--临时获取事件结构体
+    //将临时结构体加入到epoll--水平触发
     struct epoll_event ev;
     memset(&ev,0,sizeof(struct epoll_event));
-    ev.data.fd = fd;//套接字
+    ev.data.fd = fd;
     ev.events = EPOLLIN;
     return epoll_ctl(epollfd,EPOLL_CTL_ADD,fd,&ev);
 }
