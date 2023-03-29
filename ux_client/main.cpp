@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <string.h>
 #include <iostream>
+#include <sstream>
 
 using namespace std;
 
@@ -59,6 +60,25 @@ struct ct_msg
     string content;
 };
 
+size_t readn(int fd, void *buf, size_t len)
+{
+    size_t all = len;
+    char *pos = (char *)buf;
+    while (all > 0)
+    {
+        size_t size = read(fd,pos,all);
+        if (size == -1u)
+        {
+            if (errno == EINTR) size = 0;
+            else return -1;
+        }
+        else if (size == 0) return 0;
+        pos += size;
+        all -= size;
+    }
+    return len - all;
+}
+
 size_t writen(int sock,const void *buf,size_t len)
 {
     size_t all = len;
@@ -78,45 +98,135 @@ size_t writen(int sock,const void *buf,size_t len)
     return len;
 }
 
-bool send_msg(int sock,const ct_msg &msg)
+bool send_msg(int sock,const ct_msg &msg,size_t &all)
 {
-    if((writen(sock,&msg.len,sizeof(msg.len)) == -1u) ||
-        (writen(sock,msg.content .c_str(),msg.content .size()) == -1u))
-            { return false; }
-    else return true;
+    size_t ret1 = writen(sock,&msg.len,sizeof(msg.len));
+    size_t ret2 = writen(sock,msg.content.c_str(),msg.content.size());
+    all += ret1 + ret2;
+    return ret1 != -1u && ret2 != -1u;
 }
 
+void read_work(int fd)
+{
+    cout<<"read_work: "<<fd<<endl;
+    size_t all_len = 0;
+    string all_content;
+    while(true)
+    {
+        char buf[1024];
+        memset(buf,0,sizeof(buf));
+        size_t size = read(fd,&buf,sizeof(buf));
+        static int ic=0;
+        ic++;
+
+
+        all_len += size;
+//        all_content += string(buf,size);
+        all_content.append(string(buf,size));
+        vlogw("read===: " vv(size) vv(ic) vv(all_len));
+
+        bool is_break = false;
+        while(true)
+        {
+
+
+            //超过八个字节（判断是否能完整读出头部大小）
+            if(all_len > sizeof(all_len))
+            {
+                //解析出ct_msg结构体的信息--长度
+                size_t con_len = *(size_t*)string(all_content,0,sizeof(con_len)).c_str();
+
+                //判断目前剩余量是否大于等于一个包的长度
+                vlogw("read vv===: " vv(all_len - sizeof(all_len)) vv(con_len));
+                if((all_len - sizeof(all_len)) >= con_len)
+                {
+                    string buf_content(all_content,sizeof(all_len),con_len);
+
+                    static int i=0;
+                    i++;
+                    size_t po = all_len - sizeof(all_len);
+                    vlogw("show: " vv(buf_content) vv(i) vv(con_len) vv(po));
+
+                    all_len -= sizeof(all_len) + con_len;
+                    all_content = string(all_content.begin() +
+                                    sizeof(all_len) + con_len,all_content.end());
+                }
+                else
+                {
+                    is_break = true;
+                    vlogw("read  1");
+                }
+            }
+            else
+            {
+                is_break = true;
+                vlogw("read  2");
+            }
+            if(is_break) break;
+        }
+    }
+}
+
+
+
+//== 字符串类型转换 ==
+template<typename T>
+string to_string(const T& t){ ostringstream os; os<<t; return os.str(); }
+
+template<typename T>
+T from_string(const string& str){ T t; istringstream iss(str); iss>>t; return t; }
+//== 字符串类型转换 ==
+
+#include <cstring>
+#include <thread>
 int main()
 {
+
+
+//    size_t lo = 6;
+//    char oi[8];
+//    strncpy(oi,(char*)&lo,sizeof(lo));
+////    string po(oi,sizeof(lo));
+
+////    size_t lo2 = stoll(oi);
+////    cout<<"po:"<<lo2<<endl;
+//    for(int i=0;i<8;i++)
+//    {
+//        printf("[%x] ",oi[i]);
+//    }
+
+//    cout<<"============"<<endl;
 
     int sock = init_port("127.0.0.1",5005);
     if(sock < 0) { vloge("init_port err"); }
 
-
+//    char buf[1024];
+    thread th(read_work,sock);
 
 
     while (1) {
 
         ct_msg msg;
-//        string str;
         cout<<"cin buf: "<<endl;
         cin>>msg.content;
+        size_t ret = 0;
+        string str = msg.content;
         msg.len = msg.content.size();
-
-//        size_t ret = 0;
 
         cout<<"buf: "<<msg.content<<endl;
         cout<<"size: "<<msg.len<<endl;
-        for(int i=0;i<10;i++)
+        for(int i=0;i<10000;i++)
         {
-            if(send_msg(sock,msg) == false)
+//            str += to_string(i);
+//            msg.content = str + to_string(i);
+//            msg.len = msg.content.size();
+            if(send_msg(sock,msg,ret) == false)
             { cout<<"send_msg err"<<endl; }
-//            ret += send(sock,str.c_str(),str.size(),MSG_WAITALL);//MSG_WAITALL
         }
-
-
-//        cout<<"size: "<<ret<<endl;
+        cout<<"ret: "<<ret<<endl;
     }
+
+    th.join();
 
 
     cout << "Hello World!" << endl;
