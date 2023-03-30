@@ -5,20 +5,21 @@
 #include <string.h>
 #include <iostream>
 #include <sstream>
+#include <cstring>
+#include <thread>
+#include <functional>
 
 using namespace std;
 
-//===== 日志宏 =====
-#define vv(value) "["#value": "<<value<<"] "
-#define vloge(...) std::cout<<"\033[31m[Err] ["<<__FILE__<<":<"<<__LINE__ \
-    <<">] <<<< "<<__VA_ARGS__<<"\033[0m"<<endl
-#define vlogw(...) std::cout<<"\033[33m[War] ["<<__FILE__<<":<"<<__LINE__ \
-    <<">] <<<< "<<__VA_ARGS__<<"\033[0m"<<endl
-#define vlogd(...) std::cout<<"\033[32m[Deb] ["<<__FILE__<<":<"<<__LINE__ \
-    <<">] <<<< "<<__VA_ARGS__<<"\033[0m"<<endl
-#define vlogf(...) std::cout<<"[Inf] ["<<__FILE__<<":<"<<__LINE__ \
-    <<">] <<<< "<<__VA_ARGS__<<endl
-//===== 日志宏 =====
+
+//== 字符串类型转换 ==
+template<typename T>
+string to_string(const T& t){ ostringstream os; os<<t; return os.str(); }
+
+template<typename T>
+T from_string(const string& str){ T t; istringstream iss(str); iss>>t; return t; }
+//== 字符串类型转换 ==
+
 
 
 //!
@@ -54,31 +55,36 @@ int init_port(string ip,int port)
     return sock;
 }
 
-struct ct_msg
+
+//===== 分包协议 =====
+struct ct_message
 {
     size_t len;
     string content;
 };
+//===== 分包协议 =====
 
-size_t readn(int fd, void *buf, size_t len)
-{
-    size_t all = len;
-    char *pos = (char *)buf;
-    while (all > 0)
-    {
-        size_t size = read(fd,pos,all);
-        if (size == -1u)
-        {
-            if (errno == EINTR) size = 0;
-            else return -1;
-        }
-        else if (size == 0) return 0;
-        pos += size;
-        all -= size;
-    }
-    return len - all;
-}
 
+//size_t readn(int fd, void *buf, size_t len)
+//{
+//    size_t all = len;
+//    char *pos = (char *)buf;
+//    while (all > 0)
+//    {
+//        size_t size = read(fd,pos,all);
+//        if (size == -1u)
+//        {
+//            if (errno == EINTR) size = 0;
+//            else return -1;
+//        }
+//        else if (size == 0) return 0;
+//        pos += size;
+//        all -= size;
+//    }
+//    return len - all;
+//}
+
+//指定发送N个字节的内容（TCP可能会出现提前返回的情况，并不一定全部发送）
 size_t writen(int sock,const void *buf,size_t len)
 {
     size_t all = len;
@@ -98,17 +104,20 @@ size_t writen(int sock,const void *buf,size_t len)
     return len;
 }
 
-bool send_msg(int sock,const ct_msg &msg,size_t &all)
+//发送信息
+bool send_msg(int sock,const ct_message &msg,size_t *all)
 {
-    size_t ret1 = writen(sock,&msg.len,sizeof(msg.len));
-    size_t ret2 = writen(sock,msg.content.c_str(),msg.content.size());
-    all += ret1 + ret2;
-    return ret1 != -1u && ret2 != -1u;
+    string buf;
+    buf += string((char*)&msg.len,sizeof(msg.len));
+    buf += msg.content;
+    size_t ret = writen(sock,buf.c_str(),buf.size());
+    if(all != nullptr) *all = ret;
+    return ret != -1u;
 }
 
-void read_work(int fd)
+//读取反馈信息--线程启动
+void read_msg_th(int fd,function<void(string)> func_cb)
 {
-    cout<<"read_work: "<<fd<<endl;
     size_t all_len = 0;
     string all_content;
     while(true)
@@ -116,20 +125,13 @@ void read_work(int fd)
         char buf[1024];
         memset(buf,0,sizeof(buf));
         size_t size = read(fd,&buf,sizeof(buf));
-        static int ic=0;
-        ic++;
 
-
+        //加入新内容（可能存在上一次的人剩余信息）
         all_len += size;
-//        all_content += string(buf,size);
-        all_content.append(string(buf,size));
-        vlogw("read===: " vv(size) vv(ic) vv(all_len));
+        all_content += string(buf,size);
 
-        bool is_break = false;
         while(true)
         {
-
-
             //超过八个字节（判断是否能完整读出头部大小）
             if(all_len > sizeof(all_len))
             {
@@ -137,98 +139,56 @@ void read_work(int fd)
                 size_t con_len = *(size_t*)string(all_content,0,sizeof(con_len)).c_str();
 
                 //判断目前剩余量是否大于等于一个包的长度
-                vlogw("read vv===: " vv(all_len - sizeof(all_len)) vv(con_len));
                 if((all_len - sizeof(all_len)) >= con_len)
                 {
+                    //解析的内容
                     string buf_content(all_content,sizeof(all_len),con_len);
+                    if(func_cb) func_cb(buf_content);//解析出完整包后触发回调
 
-                    static int i=0;
-                    i++;
-                    size_t po = all_len - sizeof(all_len);
-                    vlogw("show: " vv(buf_content) vv(i) vv(con_len) vv(po));
-
+                    //存放剩余的内容
                     all_len -= sizeof(all_len) + con_len;
                     all_content = string(all_content.begin() +
                                     sizeof(all_len) + con_len,all_content.end());
                 }
-                else
-                {
-                    is_break = true;
-                    vlogw("read  1");
-                }
+                else break;
             }
-            else
-            {
-                is_break = true;
-                vlogw("read  2");
-            }
-            if(is_break) break;
+            else break;
         }
     }
 }
 
-
-
-//== 字符串类型转换 ==
-template<typename T>
-string to_string(const T& t){ ostringstream os; os<<t; return os.str(); }
-
-template<typename T>
-T from_string(const string& str){ T t; istringstream iss(str); iss>>t; return t; }
-//== 字符串类型转换 ==
-
-#include <cstring>
-#include <thread>
 int main()
 {
-
-
-//    size_t lo = 6;
-//    char oi[8];
-//    strncpy(oi,(char*)&lo,sizeof(lo));
-////    string po(oi,sizeof(lo));
-
-////    size_t lo2 = stoll(oi);
-////    cout<<"po:"<<lo2<<endl;
-//    for(int i=0;i<8;i++)
-//    {
-//        printf("[%x] ",oi[i]);
-//    }
-
-//    cout<<"============"<<endl;
-
     int sock = init_port("127.0.0.1",5005);
-    if(sock < 0) { vloge("init_port err"); }
+    if(sock < 0) { cout<<"== init port err =="<<endl; return -1; }
 
-//    char buf[1024];
-    thread th(read_work,sock);
+    //处理反馈信息--回显到标准输出
+    auto func_msg = [](string msg){
+        cout<<msg<<endl;
+    };
 
+    //线程检测反馈信息
+    thread (read_msg_th,sock,func_msg).detach();
 
-    while (1) {
+    while (true)
+    {
+        string str;
 
-        ct_msg msg;
-        cout<<"cin buf: "<<endl;
-        cin>>msg.content;
-        size_t ret = 0;
-        string str = msg.content;
-        msg.len = msg.content.size();
+        cout<<"send: "<<endl;
+        cin>>str;
+        if(str == "exit") { break; }
 
-        cout<<"buf: "<<msg.content<<endl;
-        cout<<"size: "<<msg.len<<endl;
-        for(int i=0;i<10000;i++)
+        ct_message msg;
+        for(int i=0;i<1000;i++)
         {
-//            str += to_string(i);
-//            msg.content = str + to_string(i);
-//            msg.len = msg.content.size();
-            if(send_msg(sock,msg,ret) == false)
-            { cout<<"send_msg err"<<endl; }
+            msg.content = str + to_string(i);
+            msg.len = msg.content.size();
+
+            if(send_msg(sock,msg,nullptr) == false)
+            { cout<<"== send err =="<<endl; }
         }
-        cout<<"ret: "<<ret<<endl;
     }
 
-    th.join();
-
-
-    cout << "Hello World!" << endl;
+    cout<<"===== end ====="<<endl;
     return 0;
 }

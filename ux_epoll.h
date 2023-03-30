@@ -18,12 +18,10 @@
 #include <condition_variable>
 #include <future>
 #include <functional>
-
-#include <mutex>
 #include <sstream>
 #include <map>
+#include <queue>
 #include <iostream>
-#include <functional>
 
 using namespace std;
 using namespace std::placeholders;
@@ -112,7 +110,7 @@ private:
 
 
 //===== 分包协议 =====
-struct ct_msg
+struct ct_message
 {
     size_t len;
     string content;
@@ -127,41 +125,46 @@ public:
     function<int(int)> close_cb = nullptr;
     channel(int fd) : _fd(fd){}
     int get_fd() const { return _fd; }
+
+    //发送string字符串，带锁
     bool send_msg(const string &msg)
     {
-        size_t ret = 0;
-        ct_msg ct;
+        unique_lock<mutex> lock(_mutex);
+        ct_message ct;
         ct.len = msg.size();
         ct.content = msg;
-        if(send_msg(_fd,ct,ret) == false)
+        if(send_msg(_fd,ct,NULL) == false)
             { close_cb(_fd); return false; }
         else return true;
     }
 
 private:
-    int _fd;
+    int _fd;            //连接套接字
+    std::mutex _mutex;  //互斥锁--发送
 
+    //指定发送N个字节的数据
     size_t writen(int sock,const void *buf,size_t len) const
     {
         size_t all = len;
         const char *pos = (const char *)buf;
-
         while (all > 0)
         {
             size_t res = write (sock,pos,all);
-            if (res <= 0)
-            { if (errno == EINTR) res = 0; else return -1; }
+            if (res <= 0){ if (errno == EINTR){res = 0;} else{return -1;} }
             pos += res; all -= res;
         }
         return len;
     }
 
-    bool send_msg(int sock,const ct_msg &msg,size_t &all) const
+    //发送信息
+    bool send_msg(int sock,const ct_message &msg,size_t *all)
     {
-        size_t ret1 = writen(sock,&msg.len,sizeof(msg.len));
-        size_t ret2 = writen(sock,msg.content.c_str(),msg.content.size());
-        all += ret1 + ret2;
-        return ret1 != -1u && ret2 != -1u;
+        string buf;
+        buf += string((char*)&msg.len,sizeof(msg.len));
+        buf += msg.content;
+        size_t ret = writen(sock,buf.c_str(),buf.size());
+        if(all != nullptr) *all = ret;
+        return ret != -1u;
     }
 };
 //===== 数据管道 =====
@@ -173,28 +176,37 @@ class ux_epoll
 public:
     ux_epoll();
     ~ux_epoll();
-    int open_epoll(int port);
+    int open_epoll(int port); //启动epoll服务器
 
-    function<void(channel &ch)> sock_new = nullptr;//新连接
-    function<void(channel &ch)> sock_close = nullptr;//关闭连接
-    function<void(channel &ch,const string &msg)> sock_read = nullptr;//读取数据
+    //新连接
+    function<void(shared_ptr<channel> pch,const string &ip)>
+            sock_new = nullptr;
+    //关闭连接
+    function<void(shared_ptr<channel> pch)>
+            sock_close = nullptr;
+    //读取数据
+    function<void(shared_ptr<channel> pch,const string &msg)>
+            sock_read = nullptr;
 
 protected:
-    int v_max_ev = 1024;
-    int v_max_read = 4096;
-    int epollfd = 0;//epoll的描述符，用于添加和移除连接
+    int _size_event = 1024;     //单次IO扫描最大事件数
+    int _size_buf = 4096;       //接收数据缓冲区大小
+    int _fd_epoll = 0;          //epoll描述符
+    mutex _mutex;               //互斥锁
+    vpool_th *_pool;            //线程池
+    mutex _mutex_parse;         //互斥锁--用于拆包解析函数
+    condition_variable _cond;   //条件变量
+    queue<function<void()>> _queue_task;    //解析任务队列
+    map<int,ct_message> _map_save_read;     //存储fd拆包剩余数据
 
-    int set_non_block(int fd);//设置为非阻塞套接字
-    int epoll_del(int fd);//从epoll移除套接字
-    int epoll_add(int fd);//套接字加入epoll
-    int init_port(int port);//放入监听端口号,返回套接字
-    void event_new(int fd);
-    void event_read(int fd);
-    void parse_buf(int fd,const char *buf,size_t size);
-    vpool_th *vpoll;
-    mutex _mutex_send;
-
-    map<int,ct_msg> map_read_cb;
+    int set_non_block(int fd);  //设置为非阻塞套接字
+    int epoll_del(int fd);      //从epoll移除套接字
+    int epoll_add(int fd);      //套接字加入epoll
+    int init_port(int port);    //初始化监听端口，返回套接字
+    void parse_buf(int fd,const char *buf,size_t size); //epoll水平触发拆包函数
+    void parse_buf_th(int fd,string buf); //epoll水平触发拆包函数
+    void work_parse_th();
+    void add_work(function<void()> task);
 };
 //===== epoll事件循环 =====
 

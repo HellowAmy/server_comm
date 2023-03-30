@@ -2,35 +2,39 @@
 
 ux_epoll::ux_epoll()
 {
-    vpoll = new vpool_th(10);
+    _pool = new vpool_th(10);//线程池初始化
+    _pool->add_work(&ux_epoll::work_parse_th,this);//启动拆包函数线程
 
-    sock_new = [=](channel &ch){
-
+    //===== 回调区 =====
+    sock_new = [=](shared_ptr<channel> pch,const string &ip){
+        string str = "sock_new channel back";
         for(int i=0;i<10000;i++)
         {
-            ch.send_msg("sock_new channel asjdvagsdfuyasd");
+            if(pch->send_msg(str + to_string(i)) == false)
+            { vloge("== send : err =="); }
         }
-        vlogd("sock_new: " vv(ch.get_fd()));
+        vlogd("sock_new: " vv(pch->get_fd()) vv(ip));
     };
 
-    sock_read = [=](channel &ch,const string &msg){
-
+    sock_read = [=](shared_ptr<channel> pch,const string &msg){
         {
-            unique_lock<mutex> lock(_mutex_send);
+            unique_lock<mutex> lock(_mutex);
             vlogd("sock_read: " vv(msg) vv(this_thread::get_id()));
-            if(ch.send_msg(msg) == false)
-            { vlogw("========send_msg======="); }
         }
 
-
-//        ch._fd
+        if(pch->send_msg("back: "+msg) == false)
+        { vlogw("========send_msg======="); }
     };
 
+    sock_close = [=](shared_ptr<channel> pch){
+        vlogd("channel 断开的fd :" vv(pch->get_fd()));
+    };
+    //===== 回调区 =====
 }
 
 ux_epoll::~ux_epoll()
 {
-    delete vpoll;
+    delete _pool;
 }
 
 //!
@@ -57,26 +61,10 @@ int ux_epoll::init_port(int port)
 
     //监听或绑定失败返回错误 | listen函数 参数2：正在连接的队列容量
     if (bind(sock, (struct sockaddr *)&servaddr,
-             sizeof(servaddr)) < 0 || listen(sock, v_max_ev) != 0)
+             sizeof(servaddr)) < 0 || listen(sock, _size_event) != 0)
     { close(sock); return -2; }
 
     return sock;
-}
-
-void ux_epoll::event_new(int fd)
-{
-    channel ch(fd);
-    if(sock_new) sock_new(ch);
-}
-
-void ux_epoll::event_read(int fd)
-{
-    vlogf("read_th: " vv(this_thread::get_id()));
-    string msg;
-    channel ch(fd);
-    ch.close_cb = bind(&ux_epoll::epoll_del,this,_1);
-//    ch.read_msg(msg);
-    if(sock_read) sock_read(ch,msg);
 }
 
 void ux_epoll::parse_buf(int fd,const char *buf,size_t size)
@@ -85,8 +73,8 @@ void ux_epoll::parse_buf(int fd,const char *buf,size_t size)
     string all_content;
 
     //查找是否有上次剩余部分
-    auto it = map_read_cb.find(fd);
-    if(it != map_read_cb.end())
+    auto it = _map_save_read.find(fd);
+    if(it != _map_save_read.end())
     {
         all_len += it->second.len + size;
         all_content += it->second.content + string(buf,size);
@@ -96,11 +84,6 @@ void ux_epoll::parse_buf(int fd,const char *buf,size_t size)
         all_len = size;
         all_content = string(buf,size);
     }
-
-
-//    static int ic=0;
-//    ic++;
-//    vlogw("\n\n in len: " vv(ic) vv(size) vv(all_len));
 
     //循环解析，一次读取可能有多个任务包
     bool is_break = false;
@@ -116,19 +99,17 @@ void ux_epoll::parse_buf(int fd,const char *buf,size_t size)
             //判断目前剩余量是否大于等于一个包的长度
             if((all_len - sizeof(all_len)) >= con_len)
             {
-                string buf_content(all_content,sizeof(all_len),con_len);//解析的内容
-
-//                static int i=0;
-//                i++;
-//                vlogw("show: " vv(buf_content) vv(i) vv(con_len) vv(buf_content.size()));
+                //解析的内容
+                string buf_content(all_content,sizeof(all_len),con_len);
 
                 //重置信息剩余量
                 all_len -= sizeof(all_len) + con_len;
                 all_content = string(all_content.begin() +
                                 sizeof(all_len) + con_len,all_content.end());
-                channel ch(fd);
-                ch.close_cb = bind(&ux_epoll::epoll_del,this,_1);
-                vpoll->add_work(sock_read,ch,buf_content);
+                //触发读回调
+                auto pch = make_shared<channel>(fd);
+                pch->close_cb = bind(&ux_epoll::epoll_del,this,_1);
+                if(sock_read) _pool->add_work(sock_read,pch,buf_content);
             }
             else is_break = true;
         }
@@ -137,21 +118,47 @@ void ux_epoll::parse_buf(int fd,const char *buf,size_t size)
         if(is_break)
         {
             //如果已经存在则插入剩余容器
-            if(it != map_read_cb.end())
+            if(it != _map_save_read.end())
             {
                 it->second.len = all_len;
                 it->second.content = all_content;
             }
             else
             {
-                ct_msg ct;
+                ct_message ct;
                 ct.len = all_len;
                 ct.content = all_content;
-                map_read_cb.emplace(fd,ct);
+                _map_save_read.emplace(fd,ct);
             }
             break;
         }
     }
+}
+
+void ux_epoll::parse_buf_th(int fd,string buf)
+{
+    parse_buf(fd,buf.c_str(),buf.size());
+}
+
+void ux_epoll::work_parse_th()
+{
+    //拆包子线程，单线程执行,自行运行一个循环防止退出，并永久占用一个线程池中的子线程
+    while (true)
+    {
+        unique_lock<std::mutex> lock(_mutex_parse);     //此处单线程启动，无需锁，用于唤醒
+        while(_queue_task.empty()){ _cond.wait(lock); } //假唤醒--退出且队列为空
+
+        //取任务并执行
+        function<void()> task = std::move(_queue_task.front());
+        _queue_task.pop();
+        task();
+    }
+}
+
+void ux_epoll::add_work(function<void()> task)
+{
+    _queue_task.push(task);
+    _cond.notify_one();
 }
 
 //!
@@ -171,11 +178,11 @@ int ux_epoll::open_epoll(int port)
 
     //创建一个epoll描述符
     //参数1：无效数，不过要求必须大于0
-    epollfd = epoll_create(1);
-    if(epollfd <= 0) { return -2; }
+    _fd_epoll = epoll_create(1);
+    if(_fd_epoll <= 0) { return -2; }
 
     if(epoll_add(listensock) != 0) { return -4; }//将监听套接字加入epoll
-    struct epoll_event events[v_max_ev];//存放epool事件的数组
+    struct epoll_event events[_size_event];//存放epool事件的数组
 
     //epoll进入监听状态
     while (true)
@@ -183,7 +190,7 @@ int ux_epoll::open_epoll(int port)
         //等待监视的socket有事件发生 | 参数4设置超时时间,-1为无限制
         //参数1：epoll描述符，参数2：epoll事件数组，
         //      参数3：同时处理的fd数量，参数4：超时（-1则无视超时时间）
-        int infds = epoll_wait(epollfd, events, v_max_ev, -1);
+        int infds = epoll_wait(_fd_epoll, events, _size_event, -1);
         if (infds < 0) { return -3; }
 
         //遍历有事件发生的结构数组
@@ -204,16 +211,14 @@ int ux_epoll::open_epoll(int port)
                 if (clientsock != -1)
                 {
                     //把新的客户端添加到epoll中
-                    if(epoll_add(clientsock) != 0)
-                    { vlogw("epoll_add err"); continue; }
-                    const char *str_ip = inet_ntoa(client.sin_addr);
-                    int port = ntohs(client.sin_port);
-                    vlogd("新连接--成功加入:" vv(str_ip) vv(port) vv(clientsock));//
-
-                    channel ch(clientsock);
-                    if(sock_new) sock_new(ch);
-//                    int fd = events[i].data.fd;
-//                    vpoll->add_work(&ux_epoll::event_new,this,fd);
+                    if(epoll_add(clientsock) == 0)
+                    {
+                        //触发新连接回调
+                        string str_ip = inet_ntoa(client.sin_addr);
+                        if(sock_new) _pool->add_work
+                                (sock_new,make_shared<channel>(clientsock),str_ip);
+                    }
+                    else vlogw("新连接--加入epoll失败");
                 }
                 else vlogw("新连接--接入失败");
             }
@@ -221,26 +226,34 @@ int ux_epoll::open_epoll(int port)
             //事件触发:有数据可读,或者连接断开
             else if (events[i].events & EPOLLIN)
             {
-                char buf[1024];
+                char buf[_size_buf];
                 memset(buf,0,sizeof(buf));
                 size_t size = read(events[i].data.fd,&buf,sizeof(buf));
-
-//                for(int i=0;i<100;i++)
-//                {
-//                    printf("[%c] ",buf[i]);
-//                }
-//                cout<<"============"<<endl;
 
                 //发生了错误或socket被对方关闭
                 if(size <= 0)
                 {
                     //把已断开的客户端从epoll中删除
-                    if(epoll_del(events[i].data.fd) != 0)
-                    { vlogw("epoll_del err"); continue; }
-                    vlogd("客户端断开，断开的fd:" vv(events[i].data.fd));
+                    if(epoll_del(events[i].data.fd) == 0)
+                    {
+
+                        //触发关闭回调
+                        int fd = events[i].data.fd;
+                        if(sock_close) _pool->add_work
+                                (sock_close,make_shared<channel>(fd));
+                    }
+                    else vlogw("连接断开：epoll删除失败");
                 }
                 else
-                { parse_buf(events[i].data.fd,buf,size); }
+                {
+                    //子线程解析（需要将字符串复制一份而不是引用）
+                    int fd = events[i].data.fd;
+                    string str(buf,size);
+                    add_work(bind(&ux_epoll::parse_buf_th,this,fd,str));//
+
+                    //原地拆包解析(无需多线程，但是可能降低IO遍历的能力)
+                    //parse_buf(events[i].data.fd,buf,size);
+                }
 
             }//<<事件触发
         }//<<遍历有事件发生的结构数组
@@ -264,7 +277,7 @@ int ux_epoll::epoll_del(int fd)
     memset(&ev, 0, sizeof(struct epoll_event));
     ev.events = EPOLLIN;
     ev.data.fd = fd;
-    int ret = epoll_ctl(epollfd, EPOLL_CTL_DEL, fd, &ev);
+    int ret = epoll_ctl(_fd_epoll, EPOLL_CTL_DEL, fd, &ev);
     if(ret != 0) close(fd);
     return ret;
 }
@@ -276,5 +289,5 @@ int ux_epoll::epoll_add(int fd)
     memset(&ev,0,sizeof(struct epoll_event));
     ev.data.fd = fd;
     ev.events = EPOLLIN;
-    return epoll_ctl(epollfd,EPOLL_CTL_ADD,fd,&ev);
+    return epoll_ctl(_fd_epoll,EPOLL_CTL_ADD,fd,&ev);
 }
