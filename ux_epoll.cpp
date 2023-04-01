@@ -5,31 +5,7 @@ ux_epoll::ux_epoll()
     _pool = new vpool_th(10);//线程池初始化
     _pool->add_work(&ux_epoll::work_parse_th,this);//启动拆包函数线程
 
-    //===== 回调区 =====
-    sock_new = [=](shared_ptr<channel> pch,const string &ip){
-        string str = "sock_new channel back";
-        for(int i=0;i<10000;i++)
-        {
-            if(pch->send_msg(str + to_string(i)) == false)
-            { vloge("== send : err =="); }
-        }
-        vlogd("sock_new: " vv(pch->get_fd()) vv(ip));
-    };
 
-    sock_read = [=](shared_ptr<channel> pch,const string &msg){
-        {
-            unique_lock<mutex> lock(_mutex);
-            vlogd("sock_read: " vv(msg) vv(this_thread::get_id()));
-        }
-
-        if(pch->send_msg("back: "+msg) == false)
-        { vlogw("========send_msg======="); }
-    };
-
-    sock_close = [=](shared_ptr<channel> pch){
-        vlogd("channel 断开的fd :" vv(pch->get_fd()));
-    };
-    //===== 回调区 =====
 }
 
 ux_epoll::~ux_epoll()
