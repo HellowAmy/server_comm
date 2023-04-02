@@ -14,7 +14,7 @@ static string ct_s(T_ct ct)
 //      由const char*指针转为T_ct*指针，再*（T_ct*）从指针中获取值，从而返回值
 template <class T_ct>
 static T_ct st_c(const string &str)
-{ return *(T_ct*)str.c_str(); }
+{ T_ct ct = *(T_ct*)str.c_str(); return ct; }
 //===== 结构体转换string函数 =====
 
 
@@ -65,15 +65,14 @@ int main()
 
     //===== 回调区 =====
     //新连接
-    server_epoll.sock_new = [&](shared_ptr<channel> pch,const string &ip){
+    server_epoll.sock_new = [&](const shared_ptr<channel> &pch,const string &ip){
         vlogd("sock_new: " vv(pch->get_fd()) vv(ip));
     };
 
     //读数据--服务器接收到数据
-    server_epoll.sock_read = [&](shared_ptr<channel> pch,const string &msg){
+    server_epoll.sock_read = [&](const shared_ptr<channel> &pch,const string &msg){
         unique_lock<mutex> lock(mutex_read); //加锁是因为服务器读数据是多线程读取
         ct_msg_swap ct = st_c<ct_msg_swap>(msg); //字符串转结构体,无需引入json即可结构化数据
-        vlogd("sock_read: " vv(ct.buf) vv(ct.et));
 
         //登陆的处理:分配ID,存储fd和昵称,反馈登陆ID,群发登陆用户信息
         if(ct.et == e_login)
@@ -157,7 +156,7 @@ int main()
     };
 
     //关闭连接--客户端主动关闭
-    server_epoll.sock_close = [&](shared_ptr<channel> pch){
+    server_epoll.sock_close = [&](const shared_ptr<channel> &pch){
         unique_lock<mutex> lock(mutex_read);
 
         //群发通知信息有用户退出

@@ -116,7 +116,7 @@ static string ct_s(T_ct ct)
 //      由const char*指针转为T_ct*指针，再*（T_ct*）从指针中获取值，从而返回值
 template <class T_ct>
 static T_ct st_c(const string &str)
-{ return *(T_ct*)str.c_str(); }
+{ T_ct ct = *(T_ct*)str.c_str(); return ct; }
 //===== 结构体转换string函数 =====
 
 
@@ -185,15 +185,6 @@ int init_port(string ip,int port)
 //===== 网络连接初始化 =====
 
 
-//===== 分包协议 =====
-struct ct_message
-{
-    size_t len;
-    string content;
-};
-//===== 分包协议 =====
-
-
 //===== 发送协议 =====
 //size_t readn(int fd, void *buf, size_t len)
 //{
@@ -234,24 +225,17 @@ size_t writen(int sock,const void *buf,size_t len)
     return len;
 }
 
-//发送信息
-bool send_msg(int sock,const ct_message &msg,size_t *all)
+//发送string字符串
+bool send_msg(int sock,const string &msg,size_t *all)
 {
+    size_t len = msg.size();
     string buf;
-    buf += string((char*)&msg.len,sizeof(msg.len));
-    buf += msg.content;
+    buf += string((char*)&len,sizeof(len));
+    buf += msg;
+
     size_t ret = writen(sock,buf.c_str(),buf.size());
     if(all != nullptr) *all = ret;
     return ret != -1u;
-}
-
-//发送string字符串
-bool send_msg(int sock,const string &msg)
-{
-    ct_message ct;
-    ct.len = msg.size();
-    ct.content = msg;
-    return send_msg(sock,ct,NULL);
 }
 
 //读取反馈信息--线程启动
@@ -344,11 +328,11 @@ int main()
     memset(&ct_login,0,sizeof(ct_login));
     ct_login.et = e_login;
     strncpy(ct_login.buf,name.c_str(),sizeof(ct_login.buf));
-    send_msg(sock,ct_s(ct_login));
+    send_msg(sock,ct_s(ct_login),nullptr);
 
     //处理反馈信息--回显到标准输出
     auto func_msg = [&](string msg){
-        ct_msg_swap ct = st_c<ct_msg_swap>(msg);
+        ct_msg_swap ct = st_c<ct_msg_swap>(msg); //解析字符串成结构体
 
         //登陆反馈信息
         if(ct.et == e_login)
@@ -383,20 +367,6 @@ int main()
     thread (read_msg_th,sock,func_msg).detach();
 
     //循环用户的信息输入
-    //      输入命令规则:(三种命令输入方式)
-    //          [文字]:直接发送--公开模式群发
-    //                  例子:     大家好,我是小黄
-    //          ID:[文字]:用冒号分割,前面是登陆ID,后面是发送内容
-    //                  例子:     3:你好阿!3号,我是小黄
-    //          [show]:查看所有的已登陆用户
-    //                  例子:     show
-    //                      返回内容:
-    //                          <<<< system:
-    //                          1:小名
-    //                          2:小黄
-    //                          3:小虎
-    //                           >>>>
-    //
     while (true)
     {
         string str;
@@ -404,10 +374,25 @@ int main()
         if(str == "exit") { break; }
 
         str = pares_send_cmd(str,name,&number); //解析输入命令
-        if(send_msg(sock,str) == false)
+        if(send_msg(sock,str,nullptr) == false)
         { cout<<"== send err =="<<endl; }
     }
 
     cout<<"===== end ====="<<endl;
     return 0;
 }
+
+//      输入命令规则:(三种命令输入方式)
+//          [文字]:直接发送--公开模式群发
+//                  例子:     大家好,我是小黄
+//          ID:[文字]:用冒号分割,前面是登陆ID,后面是发送内容
+//                  例子:     3:你好阿!3号,我是小黄
+//          [show]:查看所有的已登陆用户
+//                  例子:     show
+//                      返回内容:
+//                          <<<< system:
+//                          1:小名
+//                          2:小黄
+//                          3:小虎
+//                           >>>>
+//

@@ -4,8 +4,6 @@ ux_epoll::ux_epoll()
 {
     _pool = new vpool_th(10);//线程池初始化
     _pool->add_work(&ux_epoll::work_parse_th,this);//启动拆包函数线程
-
-
 }
 
 ux_epoll::~ux_epoll()
@@ -52,8 +50,8 @@ void ux_epoll::parse_buf(int fd,const char *buf,size_t size)
     auto it = _map_save_read.find(fd);
     if(it != _map_save_read.end())
     {
-        all_len += it->second.len + size;
-        all_content += it->second.content + string(buf,size);
+        all_len += it->second.size() + size;
+        all_content += it->second + string(buf,size);
     }
     else
     {
@@ -78,7 +76,7 @@ void ux_epoll::parse_buf(int fd,const char *buf,size_t size)
                 //解析的内容
                 string buf_content(all_content,sizeof(all_len),con_len);
 
-                //重置信息剩余量
+                //保存信息剩余量
                 all_len -= sizeof(all_len) + con_len;
                 all_content = string(all_content.begin() +
                                 sizeof(all_len) + con_len,all_content.end());
@@ -93,25 +91,16 @@ void ux_epoll::parse_buf(int fd,const char *buf,size_t size)
 
         if(is_break)
         {
-            //如果已经存在则插入剩余容器
+            //如果已经存在则插入剩余容器,不存在则新建,完成插入后退出循环
             if(it != _map_save_read.end())
-            {
-                it->second.len = all_len;
-                it->second.content = all_content;
-            }
-            else
-            {
-                ct_message ct;
-                ct.len = all_len;
-                ct.content = all_content;
-                _map_save_read.emplace(fd,ct);
-            }
+                { it->second = all_content; }
+            else { _map_save_read.emplace(fd,all_content); }
             break;
         }
     }
 }
 
-void ux_epoll::parse_buf_th(int fd,string buf)
+void ux_epoll::parse_buf_th(int fd,const string &buf)
 {
     parse_buf(fd,buf.c_str(),buf.size());
 }
@@ -222,10 +211,9 @@ int ux_epoll::open_epoll(int port)
                 }
                 else
                 {
-                    //子线程解析（需要将字符串复制一份而不是引用）
+                    //子线程解析（需要将字符串复制一份而不是引用,因为地址会反复填充新内容）
                     int fd = events[i].data.fd;
-                    string str(buf,size);
-                    add_work(bind(&ux_epoll::parse_buf_th,this,fd,str));//
+                    add_work(bind(&ux_epoll::parse_buf_th,this,fd,string(buf,size)));
 
                     //原地拆包解析(无需多线程，但是可能降低IO遍历的能力)
                     //parse_buf(events[i].data.fd,buf,size);
